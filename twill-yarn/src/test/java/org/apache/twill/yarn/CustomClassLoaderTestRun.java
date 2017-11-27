@@ -34,11 +34,9 @@ public class CustomClassLoaderTestRun extends BaseYarnTest {
     TwillController controller = getTwillRunner().prepare(new CustomClassLoaderRunnable())
       .setClassLoader(CustomClassLoader.class.getName())
       .addLogHandler(new PrinterLogHandler(new PrintWriter(System.out, true)))
-      .setJVMOptions("-Dservice.port=54321")
-      .setJVMOptions(CustomClassLoaderRunnable.class.getSimpleName(), "-Dservice.name=custom")
       .start();
 
-    Assert.assertTrue(waitForSize(controller.discoverService("custom"), 1, 120));
+    Assert.assertTrue(waitForSize(controller.discoverService(CustomClassLoaderRunnable.SERVICE_NAME), 1, 120));
     controller.terminate().get();
   }
 }

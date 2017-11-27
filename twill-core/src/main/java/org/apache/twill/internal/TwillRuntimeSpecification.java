@@ -17,7 +17,6 @@
  */
 package org.apache.twill.internal;
 
-import org.apache.twill.api.Configs;
 import org.apache.twill.api.RunId;
 import org.apache.twill.api.TwillApplication;
 import org.apache.twill.api.TwillSpecification;
@@ -38,28 +37,30 @@ public class TwillRuntimeSpecification {
   private final String zkConnectStr;
   private final RunId twillRunId;
   private final String twillAppName;
+  private final int reservedMemory;
   private final String rmSchedulerAddr;
   private final Map<String, Map<String, String>> logLevels;
   private final Map<String, Integer> maxRetries;
-  private final Map<String, String> config;
-  private final Map<String, Map<String, String>> runnableConfigs;
+  private final double minHeapRatio;
+  private final boolean logCollectionEnabled;
 
   public TwillRuntimeSpecification(TwillSpecification twillSpecification, String fsUser, URI twillAppDir,
                                    String zkConnectStr, RunId twillRunId, String twillAppName,
-                                   @Nullable String rmSchedulerAddr, Map<String, Map<String, String>> logLevels,
-                                   Map<String, Integer> maxRetries, Map<String, String> config,
-                                   Map<String, Map<String, String>> runnableConfigs) {
+                                   int reservedMemory, @Nullable String rmSchedulerAddr,
+                                   Map<String, Map<String, String>> logLevels, Map<String, Integer> maxRetries,
+                                   double minHeapRatio, boolean logCollectionEnabled) {
     this.twillSpecification = twillSpecification;
     this.fsUser = fsUser;
     this.twillAppDir = twillAppDir;
     this.zkConnectStr = zkConnectStr;
     this.twillRunId = twillRunId;
     this.twillAppName = twillAppName;
+    this.reservedMemory = reservedMemory;
     this.rmSchedulerAddr = rmSchedulerAddr;
     this.logLevels = logLevels;
     this.maxRetries = maxRetries;
-    this.config = config;
-    this.runnableConfigs = runnableConfigs;
+    this.minHeapRatio = minHeapRatio;
+    this.logCollectionEnabled = logCollectionEnabled;
   }
 
   public TwillSpecification getTwillSpecification() {
@@ -86,45 +87,19 @@ public class TwillRuntimeSpecification {
     return twillAppName;
   }
 
-  /**
-   * Returns the minimum heap ratio for the application master.
-   */
-  public double getAMMinHeapRatio() {
-    return getMinHeapRatio(config, Configs.Defaults.HEAP_RESERVED_MIN_RATIO);
+  public int getReservedMemory() {
+    return reservedMemory;
   }
 
-  /**
-   * Returns the minimum heap ratio for the given runnable.
-   */
-  public double getMinHeapRatio(String runnableName) {
-    double ratio = getMinHeapRatio(runnableConfigs.get(runnableName), 0d);
-    return ratio <= 0d ? getMinHeapRatio(config, Configs.Defaults.HEAP_RESERVED_MIN_RATIO) : ratio;
-  }
-
-  /**
-   * Returns the reserved non-heap memory size in MB for the application master.
-   */
-  public int getAMReservedMemory() {
-    return getReservedMemory(config, Configs.Keys.YARN_AM_RESERVED_MEMORY_MB,
-                             Configs.Defaults.YARN_AM_RESERVED_MEMORY_MB);
-  }
-
-  /**
-   * Returns the reserved non-heap memory size in MB for the given runnable.
-   */
-  public int getReservedMemory(String runnableName) {
-    int memory = getReservedMemory(runnableConfigs.get(runnableName), Configs.Keys.JAVA_RESERVED_MEMORY_MB, -1);
-    return memory < 0 ? getReservedMemory(config, Configs.Keys.JAVA_RESERVED_MEMORY_MB,
-                                          Configs.Defaults.JAVA_RESERVED_MEMORY_MB) : memory;
+  public double getMinHeapRatio() {
+    return minHeapRatio;
   }
 
   /**
    * Returns whether log collection is enabled.
    */
   public boolean isLogCollectionEnabled() {
-    return config.containsKey(Configs.Keys.LOG_COLLECTION_ENABLED) ?
-      Boolean.parseBoolean(config.get(Configs.Keys.LOG_COLLECTION_ENABLED)) :
-      Configs.Defaults.LOG_COLLECTION_ENABLED;
+    return logCollectionEnabled;
   }
 
   @Nullable
@@ -141,20 +116,6 @@ public class TwillRuntimeSpecification {
   }
 
   /**
-   * Returns the configuration for the application.
-   */
-  public Map<String, String> getConfig() {
-    return config;
-  }
-
-  /**
-   * Returns the configurations for each runnable.
-   */
-  public Map<String, Map<String, String>> getRunnableConfigs() {
-    return runnableConfigs;
-  }
-
-  /**
    * Returns the ZK connection string for the Kafka used for log collections,
    * or {@code null} if log collection is disabled.
    */
@@ -165,48 +126,5 @@ public class TwillRuntimeSpecification {
     }
     // When addressing TWILL-147, a field can be introduced to carry this value.
     return String.format("%s/%s/%s/kafka", getZkConnectStr(), getTwillAppName(), getTwillAppRunId());
-  }
-
-  /**
-   * Returns the minimum heap ratio ({@link Configs.Keys#HEAP_RESERVED_MIN_RATIO}) based on the given configuration.
-   */
-  private double getMinHeapRatio(@Nullable Map<String, String> config, double defaultValue) {
-    if (config == null || !config.containsKey(Configs.Keys.HEAP_RESERVED_MIN_RATIO)) {
-      return defaultValue;
-    }
-
-    try {
-      double ratio = Double.parseDouble(config.get(Configs.Keys.HEAP_RESERVED_MIN_RATIO));
-      if (ratio <= 0d) {
-        throw new IllegalArgumentException("Minimum heap ratio configured with key '" +
-                                             Configs.Keys.HEAP_RESERVED_MIN_RATIO +
-                                             "' must be > 0. It is configured to " + ratio);
-      }
-      return ratio;
-    } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Failed to parse the minimum heap ratio from configuration with key '" +
-                                           Configs.Keys.HEAP_RESERVED_MIN_RATIO + "'", e);
-    }
-  }
-
-  /**
-   * Returns the reserved memory size based on the given configuration.
-   */
-  private int getReservedMemory(@Nullable Map<String, String> config, String key, int defaultValue) {
-    if (config == null || !config.containsKey(key)) {
-      return defaultValue;
-    }
-
-    try {
-      int memory = Integer.parseInt(config.get(key));
-      if (memory < 0) {
-        throw new IllegalArgumentException("Reserved memory size configured with key '" + key +
-                                             "' must be >= 0. It is configured to " + memory);
-      }
-      return memory;
-    } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Failed to parse the reserved memory size from configuration with key '" +
-                                           key + "'", e);
-    }
   }
 }

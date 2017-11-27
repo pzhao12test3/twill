@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
  */
 public final class CustomClassLoaderRunnable extends AbstractTwillRunnable {
 
+  static final String SERVICE_NAME = "custom.service";
   static final String GENERATED_CLASS_NAME = "org.apache.twill.test.Generated";
 
   private static final Logger LOG = LoggerFactory.getLogger(CustomClassLoaderRunnable.class);
@@ -41,8 +42,7 @@ public final class CustomClassLoaderRunnable extends AbstractTwillRunnable {
     try {
       Class<?> cls = Class.forName(GENERATED_CLASS_NAME);
       java.lang.reflect.Method announce = cls.getMethod("announce", ServiceAnnouncer.class, String.class, int.class);
-      announce.invoke(cls.newInstance(), getContext(), System.getProperty("service.name"),
-                      Integer.getInteger("service.port"));
+      announce.invoke(cls.newInstance(), getContext(), SERVICE_NAME, 54321);
       Uninterruptibles.awaitUninterruptibly(stopLatch);
     } catch (Exception e) {
       LOG.error("Failed to call announce on " + GENERATED_CLASS_NAME, e);

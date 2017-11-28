@@ -1,14 +1,15 @@
 before_cache:
-- find $TRAVIS_BUILD_DIR -name .ekstazi | while read line; do du -sh $line;         DIR=$(dirname
-  $HOME/CACHE$line); mkdir -p $DIR; cp -r $line $DIR; done
+- rm -rf $HOME/CACHE; find $TRAVIS_BUILD_DIR -name .ekstazi | while read line; do
+  du -sh $line;         DIR=$(dirname $HOME/CACHE$line); mkdir -p $DIR; cp -r $line
+  $DIR; done
 - echo CACHESIZE $(du -sh $HOME/CACHE)
 before_install:
 - find $HOME/CACHE -name .ekstazi | while read line; do du -sh $line;         DIR=$(dirname
-  ${line#$HOME/CACHE}); cp -r $line $DIR; done
+  ${line#$HOME/CACHE}); if [[ -d ${DIR#.ekstazi/} ]]; then cp -r $line $DIR; fi; done
 before_script:
 - find $TRAVIS_BUILD_DIR -name .ekstazi | while read line; do rm -rf $line; done
 - find $HOME/CACHE -name .ekstazi | while read line; do du -sh $line;         DIR=$(dirname
-  ${line#$HOME/CACHE}); cp -r $line $DIR; done
+  ${line#$HOME/CACHE}); if [[ -d ${DIR#.ekstazi/} ]]; then cp -r $line $DIR; fi; done
 branches:
   only:
   - master
@@ -18,7 +19,6 @@ cache:
   directories:
   - $HOME/.m2
   - $HOME/CACHE
-dist: precise
 env:
 - PROFILE='hadoop-2.0'
 - PROFILE='hadoop-2.1'

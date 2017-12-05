@@ -39,7 +39,6 @@ public final class ResourceReportAdapter {
   private ResourceReportAdapter() {
     gson = new GsonBuilder()
               .serializeNulls()
-              .setPrettyPrinting()
               .registerTypeAdapter(TwillRunResources.class, new TwillRunResourcesCodec())
               .registerTypeAdapter(ResourceReport.class, new ResourceReportCodec())
               .create();

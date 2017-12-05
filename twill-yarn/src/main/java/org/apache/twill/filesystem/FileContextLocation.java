@@ -19,7 +19,6 @@ package org.apache.twill.filesystem;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
-
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileContext;
@@ -29,6 +28,7 @@ import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.security.AccessControlException;
 
 import java.io.FileNotFoundException;
@@ -41,7 +41,6 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
-
 import javax.annotation.Nullable;
 
 /**
@@ -163,8 +162,7 @@ final class FileContextLocation implements Location {
     // append "port" to the path URI, while the DistributedFileSystem always use the cluster logical
     // name, which doesn't allow having port in it.
     URI uri = path.toUri();
-
-    if (FileContextLocationUtil.useLogicalUri(locationFactory.getConfiguration(), uri)) {
+    if (HAUtil.isLogicalUri(locationFactory.getConfiguration(), uri)) {
       try {
         // Need to strip out the port if in HA
         return new URI(uri.getScheme(), uri.getUserInfo(), uri.getHost(),

@@ -25,11 +25,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.net.URL;
-import java.util.List;
 
 /**
  * Package private class to get {@link ResourceReport} from the application master.
@@ -38,10 +36,10 @@ final class ResourceReportClient {
   private static final Logger LOG = LoggerFactory.getLogger(ResourceReportClient.class);
 
   private final ResourceReportAdapter reportAdapter;
-  private final List<URL> resourceUrls;
+  private final URL resourceUrl;
 
-  ResourceReportClient(List<URL> resourceUrls) {
-    this.resourceUrls = resourceUrls;
+  ResourceReportClient(URL resourceUrl) {
+    this.resourceUrl = resourceUrl;
     this.reportAdapter = ResourceReportAdapter.create();
   }
 
@@ -50,20 +48,16 @@ final class ResourceReportClient {
    * @return A {@link ResourceReport} or {@code null} if failed to fetch the report.
    */
   public ResourceReport get() {
-    for (URL url : resourceUrls) {
+    try {
+      Reader reader = new BufferedReader(new InputStreamReader(resourceUrl.openStream(), Charsets.UTF_8));
       try {
-        Reader reader = new BufferedReader(new InputStreamReader(url.openStream(), Charsets.UTF_8));
-        try {
-          LOG.trace("Report returned by {}", url);
-          return reportAdapter.fromJson(reader);
-        } finally {
-          Closeables.closeQuietly(reader);
-        }
-      } catch (IOException e) {
-        // Just log a trace as it's ok to not able to fetch resource report
-        LOG.trace("Exception raised when getting resource report from {}.", url, e);
+        return reportAdapter.fromJson(reader);
+      } finally {
+        Closeables.closeQuietly(reader);
       }
+    } catch (Exception e) {
+      LOG.error("Exception getting resource report from {}.", resourceUrl, e);
+      return null;
     }
-    return null;
   }
 }

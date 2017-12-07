@@ -24,7 +24,6 @@ limitations under the License.
         </encoder>
     </appender>
 
-    <logger name="org.mortbay" level="OFF" />
     <logger name="org.apache.twill" level="DEBUG" />
 
     <root level="WARN">

@@ -22,7 +22,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import javax.annotation.Nullable;
 
 /**
  * This interface is for controlling a remote running service.
@@ -58,8 +57,7 @@ public interface ServiceController {
    * will be returned.
    *
    * @return a {@link Future} that represents the termination of the service. The future result will be
-   * this {@link ServiceController}. If the service terminated with a {@link TerminationStatus#FAILED} status,
-   * calling the {@link Future#get()} on the returning future will throw {@link ExecutionException}.
+   * this {@link ServiceController}. If the service terminated due to exception, the future will carry the exception.
    */
   Future<? extends ServiceController> terminate();
 
@@ -100,32 +98,4 @@ public interface ServiceController {
    * @throws ExecutionException if the service terminated due to exception.
    */
   void awaitTerminated(long timeout, TimeUnit timeoutUnit) throws TimeoutException, ExecutionException;
-
-  /**
-   * Gets the termination status of the application represented by this controller.
-   *
-   * @return the termination status or {@code null} if the application is still running
-   */
-  @Nullable
-  TerminationStatus getTerminationStatus();
-
-  /**
-   * Enum to represent termination status of the application when it completed.
-   */
-  enum TerminationStatus {
-    /**
-     * Application was completed successfully.
-     */
-    SUCCEEDED,
-
-    /**
-     * Application was killed explicitly.
-     */
-    KILLED,
-
-    /**
-     * Application failed.
-     */
-    FAILED
-  }
 }

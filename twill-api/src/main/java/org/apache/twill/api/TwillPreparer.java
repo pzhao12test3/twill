@@ -21,7 +21,6 @@ import org.apache.twill.api.logging.LogEntry;
 import org.apache.twill.api.logging.LogHandler;
 
 import java.net.URI;
-import java.net.URL;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -37,17 +36,6 @@ public interface TwillPreparer {
    * @return This {@link TwillPreparer}
    */
   TwillPreparer withConfiguration(Map<String, String> config);
-
-  /**
-   * Overrides the default configuration with the given set of configurations for the given runnable only.
-   * This is useful to override configurations that affects runnables, such as
-   * {@link Configs.Keys#JAVA_RESERVED_MEMORY_MB} and {@link Configs.Keys#HEAP_RESERVED_MIN_RATIO}.
-   *
-   * @param runnableName Name of the {@link TwillRunnable}.
-   * @param config set of configurations to override
-   * @return This {@link TwillPreparer}
-   */
-  TwillPreparer withConfiguration(String runnableName, Map<String, String> config);
 
   /**
    * Adds a {@link LogHandler} for receiving an application log.
@@ -85,19 +73,6 @@ public interface TwillPreparer {
    * @param options extra JVM options.
    */
   TwillPreparer setJVMOptions(String options);
-
-  /**
-   * This methods sets the extra JVM options that will be passed to the java command line for the given runnable
-   * of the application started through this {@link org.apache.twill.api.TwillPreparer} instance.
-   * The options set for the given runnable will be appended to any global options set through the
-   * {@link #setJVMOptions(String)} or {@link #addJVMOptions(String)} method.
-   *
-   * This is intended for advance usage. All options will be passed unchanged to the java command line. Invalid
-   * options could cause application not able to start.
-   *
-   * @param options extra JVM options.
-   */
-  TwillPreparer setJVMOptions(String runnableName, String options);
 
   /**
    * This methods adds extra JVM options that will be passed to the java command line for every runnable
@@ -299,18 +274,6 @@ public interface TwillPreparer {
    * @return This {@link TwillPreparer}.
    */
   TwillPreparer setLogLevels(String runnableName, Map<String, LogEntry.Level> logLevelsForRunnable);
-
-  /**
-   * Sets the class name of the {@link ClassLoader} to be used for loading twill and application classes for
-   * all containers. The {@link ClassLoader} class should have a public constructor that takes two parameters in the
-   * form of {@code (URL[] urls, ClassLoader parentClassLoader)}.
-   * The first parameter is an array of {@link URL} that contains the list of {@link URL} for loading classes and
-   * resources; the second parameter is the parent {@link ClassLoader}.
-   *
-   * @param classLoaderClassName name of the {@link ClassLoader} class.
-   * @return This {@link TwillPreparer}.
-   */
-  TwillPreparer setClassLoader(String classLoaderClassName);
 
   /**
    * Starts the application. It's the same as calling {@link #start(long, TimeUnit)} with timeout of 60 seconds.

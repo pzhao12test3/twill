@@ -26,15 +26,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses({
   ContainerSizeTestRun.class,
-  CustomClassLoaderTestRun.class,
   DebugTestRun.class,
   DistributeShellTestRun.class,
   EchoServerTestRun.class,
   EnvironmentTestRun.class,
-  EventHandlerTestRun.class,
   FailureRestartTestRun.class,
   InitializeFailTestRun.class,
-  JvmOptionsTestRun.class,
   LocalFileTestRun.class,
   LogHandlerTestRun.class,
   LogLevelChangeTestRun.class,

@@ -19,32 +19,16 @@ package org.apache.twill.internal.appmaster;
 
 import org.apache.twill.api.EventHandlerContext;
 import org.apache.twill.api.EventHandlerSpecification;
-import org.apache.twill.api.RunId;
-import org.apache.twill.internal.TwillRuntimeSpecification;
 
 /**
  *
  */
 final class BasicEventHandlerContext implements EventHandlerContext {
 
-  private final String applicationName;
-  private final RunId runId;
   private final EventHandlerSpecification specification;
 
-  public BasicEventHandlerContext(TwillRuntimeSpecification twillRuntimeSpec) {
-    this.applicationName = twillRuntimeSpec.getTwillAppName();
-    this.runId = twillRuntimeSpec.getTwillAppRunId();
-    this.specification = twillRuntimeSpec.getTwillSpecification().getEventHandler();
-  }
-
-  @Override
-  public String getApplicationName() {
-    return applicationName;
-  }
-
-  @Override
-  public RunId getRunId() {
-    return runId;
+  BasicEventHandlerContext(EventHandlerSpecification specification) {
+    this.specification = specification;
   }
 
   @Override

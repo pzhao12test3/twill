@@ -30,6 +30,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Multiset;
 import com.google.common.collect.Ranges;
 import com.google.common.collect.Sets;
+import com.google.common.io.InputSupplier;
 import com.google.common.reflect.TypeToken;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -46,7 +47,6 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.twill.api.Command;
 import org.apache.twill.api.EventHandler;
-import org.apache.twill.api.EventHandlerContext;
 import org.apache.twill.api.EventHandlerSpecification;
 import org.apache.twill.api.LocalFile;
 import org.apache.twill.api.ResourceReport;
@@ -65,12 +65,12 @@ import org.apache.twill.internal.JvmOptions;
 import org.apache.twill.internal.ProcessLauncher;
 import org.apache.twill.internal.TwillContainerLauncher;
 import org.apache.twill.internal.TwillRuntimeSpecification;
+import org.apache.twill.internal.json.JvmOptionsCodec;
 import org.apache.twill.internal.json.LocalFileCodec;
 import org.apache.twill.internal.json.TwillRuntimeSpecificationAdapter;
 import org.apache.twill.internal.state.Message;
 import org.apache.twill.internal.state.SystemMessages;
 import org.apache.twill.internal.utils.Instances;
-import org.apache.twill.internal.utils.Resources;
 import org.apache.twill.internal.yarn.AbstractYarnTwillService;
 import org.apache.twill.internal.yarn.YarnAMClient;
 import org.apache.twill.internal.yarn.YarnContainerInfo;
@@ -83,6 +83,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -108,13 +109,6 @@ import javax.annotation.Nullable;
  * The class that acts as {@code ApplicationMaster} for Twill applications.
  */
 public final class ApplicationMasterService extends AbstractYarnTwillService implements Supplier<ResourceReport> {
-  /**
-   * Final status of this service when it stops.
-   */
-  private enum StopStatus {
-    COMPLETED, // All containers complete
-    ABORTED // Aborted because of timeout
-  }
 
   private static final Logger LOG = LoggerFactory.getLogger(ApplicationMasterService.class);
   private static final Gson GSON = new GsonBuilder()
@@ -133,13 +127,14 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
   private final ExpectedContainers expectedContainers;
   private final YarnAMClient amClient;
   private final JvmOptions jvmOpts;
+  private final int reservedMemory;
+  private final double minHeapRatio;
   private final EventHandler eventHandler;
   private final Location applicationLocation;
   private final PlacementPolicyManager placementPolicyManager;
   private final Map<String, Map<String, String>> environments;
   private final TwillRuntimeSpecification twillRuntimeSpec;
 
-  private volatile StopStatus stopStatus;
   private volatile boolean stopped;
   private Queue<RunnableContainerRequest> runnableContainerRequests;
   private ExecutorService instanceChangeExecutor;
@@ -156,6 +151,8 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
     this.amClient = amClient;
     this.credentials = createCredentials();
     this.jvmOpts = loadJvmOptions();
+    this.reservedMemory = twillRuntimeSpec.getReservedMemory();
+    this.minHeapRatio = twillRuntimeSpec.getMinHeapRatio();
     this.twillSpec = twillRuntimeSpec.getTwillSpecification();
     this.placementPolicyManager = new PlacementPolicyManager(twillSpec.getPlacementPolicies());
     this.environments = getEnvironments();
@@ -166,139 +163,50 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
                                                         twillRuntimeSpec.getKafkaZKConnect());
 
     this.expectedContainers = new ExpectedContainers(twillSpec);
-    this.eventHandler = createEventHandler(twillSpec);
     this.runningContainers = createRunningContainers(amClient.getContainerId(), amClient.getHost());
+    this.eventHandler = createEventHandler(twillSpec);
   }
 
   private JvmOptions loadJvmOptions() throws IOException {
     final File jvmOptsFile = new File(Constants.Files.RUNTIME_CONFIG_JAR, Constants.Files.JVM_OPTIONS);
     if (!jvmOptsFile.exists()) {
-      return new JvmOptions("", Collections.<String, String>emptyMap(), JvmOptions.DebugOptions.NO_DEBUG);
+      return new JvmOptions(null, JvmOptions.DebugOptions.NO_DEBUG);
     }
-    try (Reader reader = Files.newBufferedReader(jvmOptsFile.toPath(), StandardCharsets.UTF_8)) {
-      return GSON.fromJson(reader, JvmOptions.class);
-    }
+    return JvmOptionsCodec.decode(new InputSupplier<Reader>() {
+      @Override
+      public Reader getInput() throws IOException {
+        return new FileReader(jvmOptsFile);
+      }
+    });
   }
 
   @SuppressWarnings("unchecked")
+  @Nullable
   private EventHandler createEventHandler(TwillSpecification twillSpec) throws ClassNotFoundException {
     // Should be able to load by this class ClassLoader, as they packaged in the same jar.
     EventHandlerSpecification handlerSpec = twillSpec.getEventHandler();
     if (handlerSpec == null) {
-      // if no handler is specified, return an EventHandler with no-op
-      return new EventHandler() {};
+      return null;
     }
 
     Class<?> handlerClass = getClass().getClassLoader().loadClass(handlerSpec.getClassName());
     Preconditions.checkArgument(EventHandler.class.isAssignableFrom(handlerClass),
                                 "Class {} does not implements {}",
                                 handlerClass, EventHandler.class.getName());
-    final EventHandler delegate = Instances.newInstance((Class<? extends EventHandler>) handlerClass);
-    // wrap all calls to the delegate EventHandler methods except initialize so that all errors will be caught
-    return new EventHandler() {
-
-      @Override
-      public void initialize(EventHandlerContext context) {
-        delegate.initialize(context);
-      }
-
-      @Override
-      public void started() {
-        try {
-          delegate.started();
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.started()", delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void containerLaunched(String runnableName, int instanceId, String containerId) {
-        try {
-          delegate.containerLaunched(runnableName, instanceId, containerId);
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.containerLaunched(String, int, String)",
-                   delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void containerStopped(String runnableName, int instanceId, String containerId, int exitStatus) {
-        try {
-          delegate.containerStopped(runnableName, instanceId, containerId, exitStatus);
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.containerStopped(String, int, String, int)",
-                   delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void completed() {
-        try {
-          delegate.completed();
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.completed()", delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void killed() {
-        try {
-          delegate.killed();
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.killed()", delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void aborted() {
-        try {
-          delegate.aborted();
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.aborted()", delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public void destroy() {
-        try {
-          delegate.destroy();
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.destroy()", delegate.getClass().getName(), t);
-        }
-      }
-
-      @Override
-      public TimeoutAction launchTimeout(Iterable<TimeoutEvent> timeoutEvents) {
-        try {
-          return delegate.launchTimeout(timeoutEvents);
-        } catch (Throwable t) {
-          LOG.warn("Exception raised when calling {}.launchTimeout(Iterable<TimeoutEvent>)",
-                   delegate.getClass().getName(), t);
-        }
-        // call super.launchTimeout in case of any errors from the delegate
-        return super.launchTimeout(timeoutEvents);
-      }
-    };
+    return Instances.newInstance((Class<? extends EventHandler>) handlerClass);
   }
 
   private RunningContainers createRunningContainers(ContainerId appMasterContainerId,
                                                     String appMasterHost) throws Exception {
-    int containerMemoryMB = Integer.parseInt(System.getenv(EnvKeys.YARN_CONTAINER_MEMORY_MB));
-
-    // We can't get the -Xmx easily, so just recompute the -Xmx in the same way that the client does
-    int maxHeapMemoryMB = Resources.computeMaxHeapSize(containerMemoryMB,
-                                                       twillRuntimeSpec.getAMReservedMemory(),
-                                                       twillRuntimeSpec.getAMMinHeapRatio());
     TwillRunResources appMasterResources = new DefaultTwillRunResources(
       0,
       appMasterContainerId.toString(),
       Integer.parseInt(System.getenv(EnvKeys.YARN_CONTAINER_VIRTUAL_CORES)),
-      containerMemoryMB,
-      maxHeapMemoryMB,
+      Integer.parseInt(System.getenv(EnvKeys.YARN_CONTAINER_MEMORY_MB)),
       appMasterHost, null);
     String appId = appMasterContainerId.getApplicationAttemptId().getApplicationId().toString();
-    return new RunningContainers(twillRuntimeSpec, appId, appMasterResources, zkClient, applicationLocation,
-                                 twillSpec.getRunnables(), eventHandler);
+    return new RunningContainers(appId, appMasterResources, zkClient, applicationLocation,
+      twillSpec.getRunnables(), twillRuntimeSpec.getMaxRetries());
   }
 
   @Override
@@ -312,9 +220,9 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
       TwillRuntimeSpecificationAdapter.create().toJson(twillRuntimeSpec));
 
     // initialize the event handler, if it fails, it will fail the application.
-    eventHandler.initialize(new BasicEventHandlerContext(twillRuntimeSpec));
-    // call event handler started.
-    eventHandler.started();
+    if (eventHandler != null) {
+      eventHandler.initialize(new BasicEventHandlerContext(twillSpec.getEventHandler()));
+    }
 
     instanceChangeExecutor = Executors.newSingleThreadExecutor(Threads.createDaemonThreadFactory("instanceChanger"));
 
@@ -330,6 +238,15 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
 
     LOG.info("Stop application master with spec: {}",
              TwillRuntimeSpecificationAdapter.create().toJson(twillRuntimeSpec));
+
+    if (eventHandler != null) {
+      try {
+        // call event handler destroy. If there is error, only log and not affected stop sequence.
+        eventHandler.destroy();
+      } catch (Throwable t) {
+        LOG.warn("Exception when calling {}.destroy()", eventHandler.getClass().getName(), t);
+      }
+    }
 
     instanceChangeExecutor.shutdownNow();
 
@@ -374,24 +291,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
     // Since all the runnables are now stopped, it is okay to stop the poller.
     stopPoller.shutdownNow();
     cleanupDir();
-    if (stopStatus == null) {
-      // if finalStatus is not set, the application must be stopped by a SystemMessages#STOP_COMMAND
-      eventHandler.killed();
-    } else {
-      switch (stopStatus) {
-        case COMPLETED:
-          eventHandler.completed();
-          break;
-        case ABORTED:
-          eventHandler.aborted();
-          break;
-        default:
-          // should never reach here
-          LOG.error("Unsupported FinalStatus '{}'", stopStatus.name());
-      }
-    }
-    // call event handler destroy
-    eventHandler.destroy();
   }
 
   @Override
@@ -495,7 +394,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
       // Looks for containers requests.
       if (provisioning.isEmpty() && runnableContainerRequests.isEmpty() && runningContainers.isEmpty()) {
         LOG.info("All containers completed. Shutting down application master.");
-        stopStatus = StopStatus.COMPLETED;
         break;
       }
 
@@ -624,18 +522,17 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
       }
     }
 
-    if (!timeoutEvents.isEmpty()) {
-      EventHandler.TimeoutAction action = eventHandler.launchTimeout(timeoutEvents);
+    if (!timeoutEvents.isEmpty() && eventHandler != null) {
       try {
+        EventHandler.TimeoutAction action = eventHandler.launchTimeout(timeoutEvents);
         if (action.getTimeout() < 0) {
           // Abort application
-          stopStatus = StopStatus.ABORTED;
           stop();
         } else {
           return nextTimeoutCheck + action.getTimeout();
         }
       } catch (Throwable t) {
-        LOG.warn("Exception when handling TimeoutAction.", t);
+        LOG.warn("Exception when calling EventHandler {}. Ignore the result.", t);
       }
     }
     return nextTimeoutCheck + Constants.PROVISION_TIMEOUT;
@@ -770,8 +667,7 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
       TwillContainerLauncher launcher = new TwillContainerLauncher(
         twillSpec.getRunnables().get(runnableName), processLauncher.getContainerInfo(), launchContext,
         ZKClients.namespace(zkClient, getZKNamespace(runnableName)),
-        containerCount, jvmOpts, twillRuntimeSpec.getReservedMemory(runnableName),
-        twillRuntimeSpec.getMinHeapRatio(runnableName), getSecureStoreLocation());
+        containerCount, jvmOpts, reservedMemory, getSecureStoreLocation(), minHeapRatio);
 
       runningContainers.start(runnableName, processLauncher.getContainerInfo(), launcher);
 

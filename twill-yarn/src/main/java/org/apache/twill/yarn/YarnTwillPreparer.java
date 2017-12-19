@@ -75,6 +75,7 @@ import org.apache.twill.internal.appmaster.ApplicationMasterMain;
 import org.apache.twill.internal.container.TwillContainerMain;
 import org.apache.twill.internal.io.LocationCache;
 import org.apache.twill.internal.json.ArgumentsCodec;
+import org.apache.twill.internal.json.JvmOptionsCodec;
 import org.apache.twill.internal.json.LocalFileCodec;
 import org.apache.twill.internal.json.TwillRuntimeSpecificationAdapter;
 import org.apache.twill.internal.utils.Dependencies;
@@ -113,7 +114,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
-import javax.annotation.Nullable;
 
 /**
  * Implementation for {@link TwillPreparer} to prepare and launch distributed application on Hadoop YARN.
@@ -146,18 +146,16 @@ final class YarnTwillPreparer implements TwillPreparer {
   private final Credentials credentials;
   private final Map<String, Map<String, String>> logLevels = Maps.newHashMap();
   private final LocationCache locationCache;
-  private final Map<String, Integer> maxRetries = Maps.newHashMap();
-  private final Map<String, Map<String, String>> runnableConfigs = Maps.newHashMap();
-  private final Map<String, String> runnableExtraOptions = Maps.newHashMap();
+  private final Set<URL> twillClassPaths;
+  private String schedulerQueue;
   private String extraOptions;
   private JvmOptions.DebugOptions debugOptions = JvmOptions.DebugOptions.NO_DEBUG;
-  private String schedulerQueue;
   private ClassAcceptor classAcceptor;
-  private String classLoaderClassName;
+  private final Map<String, Integer> maxRetries = Maps.newHashMap();
 
   YarnTwillPreparer(Configuration config, TwillSpecification twillSpec, RunId runId,
-                    String zkConnectString, Location appLocation, @Nullable String extraOptions,
-                    LocationCache locationCache, YarnTwillControllerFactory controllerFactory) {
+                    String zkConnectString, Location appLocation, Set<URL> twillClassPaths,
+                    String extraOptions, LocationCache locationCache, YarnTwillControllerFactory controllerFactory) {
     this.config = config;
     this.twillSpec = twillSpec;
     this.runId = runId;
@@ -165,9 +163,10 @@ final class YarnTwillPreparer implements TwillPreparer {
     this.appLocation = appLocation;
     this.controllerFactory = controllerFactory;
     this.credentials = createCredentials();
-    this.extraOptions = extraOptions == null ? "" : extraOptions;
+    this.extraOptions = extraOptions;
     this.classAcceptor = new ClassAcceptor();
     this.locationCache = locationCache;
+    this.twillClassPaths = twillClassPaths;
   }
 
   private void confirmRunnableName(String runnableName) {
@@ -181,13 +180,6 @@ final class YarnTwillPreparer implements TwillPreparer {
     for (Map.Entry<String, String> entry : config.entrySet()) {
       this.config.set(entry.getKey(), entry.getValue());
     }
-    return this;
-  }
-
-  @Override
-  public TwillPreparer withConfiguration(String runnableName, Map<String, String> config) {
-    confirmRunnableName(runnableName);
-    runnableConfigs.put(runnableName, Maps.newHashMap(config));
     return this;
   }
 
@@ -210,23 +202,13 @@ final class YarnTwillPreparer implements TwillPreparer {
 
   @Override
   public TwillPreparer setJVMOptions(String options) {
-    Preconditions.checkArgument(options != null, "JVM options cannot be null.");
     this.extraOptions = options;
     return this;
   }
 
   @Override
-  public TwillPreparer setJVMOptions(String runnableName, String options) {
-    confirmRunnableName(runnableName);
-    Preconditions.checkArgument(options != null, "JVM options cannot be null.");
-    runnableExtraOptions.put(runnableName, options);
-    return this;
-  }
-
-  @Override
   public TwillPreparer addJVMOptions(String options) {
-    Preconditions.checkArgument(options != null, "JVM options cannot be null.");
-    this.extraOptions = extraOptions.isEmpty() ? options : extraOptions + " " + options;
+    this.extraOptions = extraOptions == null ? options : extraOptions + " " + options;
     return this;
   }
 
@@ -237,9 +219,6 @@ final class YarnTwillPreparer implements TwillPreparer {
 
   @Override
   public TwillPreparer enableDebugging(boolean doSuspend, String... runnables) {
-    for (String runnableName : runnables) {
-      confirmRunnableName(runnableName);
-    }
     this.debugOptions = new JvmOptions.DebugOptions(true, doSuspend, ImmutableSet.copyOf(runnables));
     return this;
   }
@@ -373,12 +352,6 @@ final class YarnTwillPreparer implements TwillPreparer {
   }
 
   @Override
-  public TwillPreparer setClassLoader(String classLoaderClassName) {
-    this.classLoaderClassName = classLoaderClassName;
-    return this;
-  }
-
-  @Override
   public TwillController start() {
     return start(Constants.APPLICATION_MAX_START_SECONDS, TimeUnit.SECONDS);
   }
@@ -393,23 +366,22 @@ final class YarnTwillPreparer implements TwillPreparer {
         new Callable<ProcessController<YarnApplicationReport>>() {
           @Override
           public ProcessController<YarnApplicationReport> call() throws Exception {
+
             // Local files needed by AM
             Map<String, LocalFile> localFiles = Maps.newHashMap();
 
             createLauncherJar(localFiles);
             createTwillJar(createBundler(classAcceptor), yarnAppClient, localFiles);
-            createApplicationJar(createBundler(classAcceptor), localFiles);
+            createApplicationJar(createApplicationJarBundler(classAcceptor), localFiles);
             createResourcesJar(createBundler(classAcceptor), localFiles);
 
-            TwillRuntimeSpecification twillRuntimeSpec;
-            JvmOptions jvmOptions;
             Path runtimeConfigDir = Files.createTempDirectory(getLocalStagingDir().toPath(),
                                                               Constants.Files.RUNTIME_CONFIG_JAR);
             try {
-              twillRuntimeSpec = saveSpecification(twillSpec, runtimeConfigDir.resolve(Constants.Files.TWILL_SPEC));
+              saveSpecification(twillSpec, runtimeConfigDir.resolve(Constants.Files.TWILL_SPEC));
               saveLogback(runtimeConfigDir.resolve(Constants.Files.LOGBACK_TEMPLATE));
               saveClassPaths(runtimeConfigDir);
-              jvmOptions = saveJvmOptions(runtimeConfigDir.resolve(Constants.Files.JVM_OPTIONS));
+              saveJvmOptions(runtimeConfigDir.resolve(Constants.Files.JVM_OPTIONS));
               saveArguments(new Arguments(arguments, runnableArgs),
                             runtimeConfigDir.resolve(Constants.Files.ARGUMENTS));
               saveEnvironments(runtimeConfigDir.resolve(Constants.Files.ENVIRONMENTS));
@@ -426,9 +398,10 @@ final class YarnTwillPreparer implements TwillPreparer {
             //     appMaster.jar
             //     org.apache.twill.internal.appmaster.ApplicationMasterMain
             //     false
-            int memory = Resources.computeMaxHeapSize(appMasterInfo.getMemoryMB(),
-                                                      twillRuntimeSpec.getAMReservedMemory(),
-                                                      twillRuntimeSpec.getAMMinHeapRatio());
+
+            int reservedMemoryMB = config.getInt(Configs.Keys.YARN_AM_RESERVED_MEMORY_MB,
+                                                 Configs.Defaults.YARN_AM_RESERVED_MEMORY_MB);
+            int memory = Resources.computeMaxHeapSize(appMasterInfo.getMemoryMB(), reservedMemoryMB, getMinHeapRatio());
             return launcher.prepareLaunch(ImmutableMap.<String, String>of(), localFiles.values(),
                                           createSubmissionCredentials())
               .addCommand(
@@ -438,7 +411,7 @@ final class YarnTwillPreparer implements TwillPreparer {
                 "-Dtwill.app=$" + Constants.TWILL_APP_NAME,
                 "-cp", Constants.Files.LAUNCHER_JAR + ":$HADOOP_CONF_DIR",
                 "-Xmx" + memory + "m",
-                jvmOptions.getAMExtraOptions(),
+                extraOptions == null ? "" : extraOptions,
                 TwillLauncher.class.getName(),
                 ApplicationMasterMain.class.getName(),
                 Boolean.FALSE.toString())
@@ -459,21 +432,26 @@ final class YarnTwillPreparer implements TwillPreparer {
   }
 
   /**
+   * Returns the minimum heap ratio based on the configuration.
+   */
+  private double getMinHeapRatio() {
+    // doing this way to support hadoop-2.0 profile
+    String minHeapRatioStr = config.get(Configs.Keys.HEAP_RESERVED_MIN_RATIO);
+    return (minHeapRatioStr == null) ? Configs.Defaults.HEAP_RESERVED_MIN_RATIO : Double.parseDouble(minHeapRatioStr);
+  }
+
+  /**
+   * Returns the reserved memory size in MB based on the configuration.
+   */
+  private int getReservedMemory() {
+    return config.getInt(Configs.Keys.JAVA_RESERVED_MEMORY_MB, Configs.Defaults.JAVA_RESERVED_MEMORY_MB);
+  }
+
+  /**
    * Returns the local staging directory based on the configuration.
    */
   private File getLocalStagingDir() {
     return new File(config.get(Configs.Keys.LOCAL_STAGING_DIRECTORY, Configs.Defaults.LOCAL_STAGING_DIRECTORY));
-  }
-
-  /**
-   * Returns the extra options for the container JVM.
-   */
-  private String addClassLoaderClassName(String extraOptions) {
-    if (classLoaderClassName == null) {
-      return extraOptions;
-    }
-    String classLoaderProperty = "-D" + Constants.TWILL_CONTAINER_CLASSLOADER + "=" + classLoaderClassName;
-    return extraOptions.isEmpty() ? classLoaderProperty : extraOptions + " " + classLoaderProperty;
   }
 
   private void setEnv(String runnableName, Map<String, String> env, boolean overwrite) {
@@ -674,7 +652,7 @@ final class YarnTwillPreparer implements TwillPreparer {
     return localFiles;
   }
 
-  private TwillRuntimeSpecification saveSpecification(TwillSpecification spec, Path targetFile) throws IOException {
+  private void saveSpecification(TwillSpecification spec, Path targetFile) throws IOException {
     final Multimap<String, LocalFile> runnableLocalFiles = populateRunnableLocalFiles(spec);
 
     // Rewrite LocalFiles inside twillSpec
@@ -696,22 +674,15 @@ final class YarnTwillPreparer implements TwillPreparer {
       }
       TwillSpecification newTwillSpec = new DefaultTwillSpecification(spec.getName(), runtimeSpec, spec.getOrders(),
                                                                       spec.getPlacementPolicies(), eventHandler);
-      Map<String, String> configMap = Maps.newHashMap();
-      for (Map.Entry<String, String> entry : config) {
-        if (entry.getKey().startsWith("twill.")) {
-          configMap.put(entry.getKey(), entry.getValue());
-        }
-      }
-
-      TwillRuntimeSpecification twillRuntimeSpec = new TwillRuntimeSpecification(
-        newTwillSpec, appLocation.getLocationFactory().getHomeLocation().getName(),
-        appLocation.toURI(), zkConnectString, runId, twillSpec.getName(),
-        config.get(YarnConfiguration.RM_SCHEDULER_ADDRESS),
-        logLevels, maxRetries, configMap, runnableConfigs);
-      TwillRuntimeSpecificationAdapter.create().toJson(twillRuntimeSpec, writer);
-      LOG.debug("Done {}", targetFile);
-      return twillRuntimeSpec;
+      boolean logCollectionEnabled = config.getBoolean(Configs.Keys.LOG_COLLECTION_ENABLED,
+                                                       Configs.Defaults.LOG_COLLECTION_ENABLED);
+      TwillRuntimeSpecificationAdapter.create().toJson(
+        new TwillRuntimeSpecification(newTwillSpec, appLocation.getLocationFactory().getHomeLocation().getName(),
+                                      appLocation.toURI(), zkConnectString, runId, twillSpec.getName(),
+                                      getReservedMemory(), config.get(YarnConfiguration.RM_SCHEDULER_ADDRESS),
+                                      logLevels, maxRetries, getMinHeapRatio(), logCollectionEnabled), writer);
     }
+    LOG.debug("Done {}", targetFile);
   }
 
   private void saveLogback(Path targetFile) throws IOException {
@@ -773,30 +744,20 @@ final class YarnTwillPreparer implements TwillPreparer {
                 Joiner.on(':').join(classPaths).getBytes(StandardCharsets.UTF_8));
   }
 
-  private JvmOptions saveJvmOptions(final Path targetPath) throws IOException {
-    // Append runnable specific extra options.
-    Map<String, String> runnableExtraOptions = Maps.newHashMap(
-      Maps.transformValues(this.runnableExtraOptions, new Function<String, String>() {
-        @Override
-        public String apply(String options) {
-          return addClassLoaderClassName(extraOptions.isEmpty() ? options : extraOptions + " " + options);
-        }
-      }));
-
-    String globalOptions = addClassLoaderClassName(extraOptions);
-    JvmOptions jvmOptions = new JvmOptions(globalOptions, runnableExtraOptions, debugOptions);
-    if (globalOptions.isEmpty() && runnableExtraOptions.isEmpty()
-      && JvmOptions.DebugOptions.NO_DEBUG.equals(debugOptions)) {
+  private void saveJvmOptions(final Path targetPath) throws IOException {
+    if ((extraOptions == null || extraOptions.isEmpty()) &&
+      JvmOptions.DebugOptions.NO_DEBUG.equals(debugOptions)) {
       // If no vm options, no need to localize the file.
-      return jvmOptions;
+      return;
     }
-
     LOG.debug("Creating {}", targetPath);
-    try (Writer writer = Files.newBufferedWriter(targetPath, StandardCharsets.UTF_8)) {
-      new Gson().toJson(new JvmOptions(globalOptions, runnableExtraOptions, debugOptions), writer);
-    }
+    JvmOptionsCodec.encode(new JvmOptions(extraOptions, debugOptions), new OutputSupplier<Writer>() {
+      @Override
+      public Writer getOutput() throws IOException {
+        return Files.newBufferedWriter(targetPath, StandardCharsets.UTF_8);
+      }
+    });
     LOG.debug("Done {}", targetPath);
-    return jvmOptions;
   }
 
   private void saveArguments(Arguments arguments, final Path targetPath) throws IOException {
@@ -873,5 +834,20 @@ final class YarnTwillPreparer implements TwillPreparer {
 
   private ApplicationBundler createBundler(ClassAcceptor classAcceptor) {
     return new ApplicationBundler(classAcceptor).setTempDir(getLocalStagingDir());
+  }
+
+  /**
+   * Creates a {@link ApplicationBundler} for building application jar. The bundler will include classes
+   * accepted by the given {@link ClassAcceptor}, as long as it is not a twill class.
+   */
+  private ApplicationBundler createApplicationJarBundler(final ClassAcceptor classAcceptor) {
+    // Accept classes based on the classAcceptor and also excluding all twill classes as they are already
+    // in the twill.jar
+    return createBundler(new ClassAcceptor() {
+      @Override
+      public boolean accept(String className, URL classUrl, URL classPathUrl) {
+        return !twillClassPaths.contains(classPathUrl) && classAcceptor.accept(className, classUrl, classPathUrl);
+      }
+    });
   }
 }

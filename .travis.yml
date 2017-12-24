@@ -19,7 +19,6 @@ cache:
   directories:
   - $HOME/.m2
   - $HOME/CACHE
-dist: precise
 env:
 - PROFILE='hadoop-2.0'
 - PROFILE='hadoop-2.1'
